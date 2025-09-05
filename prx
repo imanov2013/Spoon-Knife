@@ -1,0 +1,178 @@
+import { ChangeDetectorRef, Component, Inject, OnDestroy, OnInit, Optional } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import {
+  ControlContainer,
+  FormControl,
+  FormGroup,
+  ReactiveFormsModule,
+  FormGroupDirective,
+} from '@angular/forms';
+import {
+  EXTENSIONS_FORM_PROP,
+  EXTENSIONS_FORM_PROP_DATA,
+  EXTENSIBLE_FORM_VIEW_PROVIDER,
+  FormProp,
+} from '@abp/ng.components/extensible';
+import { ClientService } from '../../../../proxy/clients';
+import { Subscription, Observable } from 'rxjs';
+import { map, shareReplay, take } from 'rxjs/operators';
+import { AssignedClientDto } from '@proxy/dtos/clients';
+import { UserContextService } from '../../services/user-context.service';
+import { isRecordAutomaticFromPropData } from '../../utils/user-domain.utils';
+import { CoreModule } from '@abp/ng.core';
+
+@Component({
+  selector: 'app-clients-select',
+  standalone: true,
+  imports: [CommonModule, ReactiveFormsModule, CoreModule],
+  templateUrl: './clients-select.component.html',
+  styleUrls: ['./clients-select.component.scss'],
+  viewProviders: [EXTENSIBLE_FORM_VIEW_PROVIDER],
+})
+export class ClientsSelectComponent implements OnInit, OnDestroy {
+  control!: FormControl<string[]>;
+  clients: AssignedClientDto[] = [];
+  isLoading = true;
+  readOnly = false;
+
+  private sub = new Subscription();
+  private clients$?: Observable<AssignedClientDto[]>;
+  private nameByCode = new Map<string, string>();
+
+  constructor(
+    private clientService: ClientService,
+    private controlContainer: ControlContainer,
+    private cdr: ChangeDetectorRef,
+    @Inject(EXTENSIONS_FORM_PROP) public prop: FormProp<any>,
+    @Inject(EXTENSIONS_FORM_PROP_DATA) public propData: any,
+    private ux: UserContextService,
+    @Optional() public formDir: FormGroupDirective
+  ) {}
+
+  ngOnInit(): void {
+    const formGroup = this.controlContainer.control as FormGroup;
+    const extra = formGroup.get('extraProperties') as FormGroup;
+
+    this.control = extra.get(this.prop.name) as FormControl<string[]>;
+    if (!this.control) {
+      this.control = new FormControl<string[]>([]);
+      extra.addControl(this.prop.name, this.control);
+    }
+
+    const initialValues: string[] = this.propData?.extraProperties?.[this.prop.name] ?? [];
+    this.control.setValue(Array.isArray(initialValues) ? initialValues : [], { emitEvent: false });
+
+    const recordIsAuto = isRecordAutomaticFromPropData(this.propData, formGroup);
+
+    this.sub.add(
+      this.ux.isAutoAdmin$.subscribe((isAutoAdmin) => {
+        this.readOnly = !isAutoAdmin && recordIsAuto;
+
+        if (this.readOnly && this.control.enabled) {
+          this.control.disable({ emitEvent: false });
+          this.isLoading = false;
+        } else if (!this.readOnly && this.control.disabled) {
+          this.control.enable({ emitEvent: false });
+        }
+
+        if (!this.readOnly && !this.clients$) {
+          this.clients$ = this.clientService.getByCurrentUser().pipe(
+            map((res) => res.items ?? []),
+            shareReplay({ bufferSize: 1, refCount: true })
+          );
+          this.sub.add(
+            this.clients$.pipe(take(1)).subscribe((items) => {
+              this.clients = items;
+              this.nameByCode.clear();
+              for (const it of items) this.nameByCode.set(it.code, it.name);
+              this.isLoading = false;
+
+              if (!this.clients.length && this.control.hasError('required')) {
+                this.control.setErrors(null);
+              }
+              if (!Array.isArray(this.control.value)) {
+                this.control.setValue([], { emitEvent: false });
+              }
+              this.cdr.detectChanges();
+            })
+          );
+        }
+
+        this.cdr.markForCheck();
+      })
+    );
+
+    if (this.formDir?.ngSubmit) {
+      this.sub.add(
+        this.formDir.ngSubmit.subscribe(() => {
+          if (this.control.invalid) {
+            this.control.markAsTouched();
+            this.cdr.markForCheck();
+          }
+        })
+      );
+    }
+  }
+
+  displayLabel = (code: string) => this.nameByCode.get(code) ?? code;
+
+  onCheckboxChange(value: string, event: Event) {
+    const checked = (event.target as HTMLInputElement).checked;
+    const current = Array.isArray(this.control.value) ? this.control.value : [];
+    const set = new Set(current);
+    if (checked) set.add(value);
+    else set.delete(value);
+    this.control.setValue(Array.from(set));
+    this.control.markAsTouched();
+  }
+
+  trackByCode = (_: number, c: AssignedClientDto) => c.code;
+
+  ngOnDestroy(): void {
+    this.sub.unsubscribe();
+  }
+}
+<label> {{ '::UserManagement.Clients.Label.Clients' | abpLocalization }}</label>
+
+<div *ngIf="isLoading">
+  <div *ngFor="let i of [1, 2, 3, 4]" class="skeleton-box"></div>
+</div>
+
+<div *ngIf="!isLoading && readOnly">
+  <ng-container *ngIf="(control.value?.length ?? 0) > 0; else noAssigned">
+    <ul class="plain-list">
+      <li *ngFor="let code of control.value">
+        {{ displayLabel(code) }}
+      </li>
+    </ul>
+  </ng-container>
+  <ng-template #noAssigned>
+    <div class="text-muted">
+      {{ '::UserManagement:Clients::NoClientAffected' | abpLocalization }}
+    </div>
+  </ng-template>
+</div>
+
+<div *ngIf="!isLoading && !readOnly">
+  <ng-container *ngIf="clients?.length; else noOptions">
+    <div *ngFor="let client of clients; trackBy: trackByCode">
+      <input
+        title="clients"
+        type="checkbox"
+        [value]="client.code"
+        [checked]="control.value?.includes(client.code)"
+        (change)="onCheckboxChange(client.code, $event)"
+        [disabled]="control.disabled"
+      />
+      <label>{{ client.name }}</label>
+    </div>
+
+    <div *ngIf="control.invalid && (control.touched || formDir?.submitted)" class="error-message">
+      Ce champ est requis.
+    </div>
+  </ng-container>
+  <ng-template #noOptions>
+    <div class="text-muted">{{ '::UserManagement:Clients::NoOptions' | abpLocalization }}</div>
+  </ng-template>
+</div>
+
